@@ -1,5 +1,13 @@
 # FinanceOntology
 
+## Bootstrap
+
+> I want a system that will build and maintain an ontology of the enterprise finance team for use by AI Agents. There must be an MCP server that can be used by common agents like Claude, Co-pilot, Codex etc.
+>
+> It must support the ability to ingest information from API's and MCP servers of systems used by the finance team, it must be able provide the information needed by agents to orchestrate calls between systems my maintaining a semantic data layer.
+>
+> It must be able describe gaps and uncertainty in the semantic data layer.
+
 A system to build and maintain a semantic ontology for the enterprise finance team, usable by AI agents (Claude, GitHub Copilot, Codex, etc.) via the **Model Context Protocol (MCP)**.
 
 ## Overview
