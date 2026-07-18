@@ -1,15 +1,6 @@
-/**
- * MCP-to-MCP Ingestion Connector.
- *
- * Connects to an external MCP server (a finance system that exposes an MCP
- * interface) and ingests its resources/tools into the ontology.
- *
- * This enables the Finance Ontology to act as a meta-layer over multiple
- * MCP-enabled systems, maintaining semantic mappings between them.
- */
-
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import type { RequestOptions } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type {
   SystemDef,
   IngestionResult,
@@ -17,6 +8,8 @@ import type {
   FieldMapping,
 } from '../ontology/types.js';
 import type { OntologyManager } from '../ontology/manager.js';
+import type { LlmService, IngestionMappingProposal } from '../services/llm.js';
+import { HIGH_CONFIDENCE_THRESHOLD } from '../services/llm.js';
 
 export interface McpIngestionOptions {
   /** Command to spawn the external MCP server process */
@@ -29,17 +22,21 @@ export interface McpIngestionOptions {
 
 export class McpConnector {
   private manager: OntologyManager;
+  private llmService?: LlmService;
 
-  constructor(manager: OntologyManager) {
+  constructor(manager: OntologyManager, llmService?: LlmService) {
     this.manager = manager;
+    this.llmService = llmService;
   }
 
   /**
    * Connect to an external MCP server, enumerate its resources and tools,
    * and map them into the ontology.
    *
-   * @param systemId  - ID of the SystemDef representing the MCP server
-   * @param options   - Spawn options for the MCP process
+   * When an LlmService is available, all resources and tools are batched into
+   * a single gpt-4o (architect) call:
+   * - confidence >= 0.85 → link to the existing concept via SystemMapping
+   * - confidence <  0.85 → report a gap; deterministic fallback creates the concept
    */
   async ingestFromMcpServer(
     systemId: string,
@@ -72,23 +69,86 @@ export class McpConnector {
       { capabilities: {} }
     );
 
+    const requestOptions: RequestOptions | undefined =
+      options.timeoutMs !== undefined ? { timeout: options.timeoutMs } : undefined;
+
     try {
-      await client.connect(transport);
+      await client.connect(transport, requestOptions);
       this.manager.updateSystem(systemId, { status: 'ingesting' });
 
-      // ── Ingest Resources ────────────────────────────────────────────────────
-      const resourcesResponse = await client.listResources();
-      for (const resource of resourcesResponse.resources) {
-        await this.ingestResource(system, resource, result);
+      const resourcesResponse = await client.listResources(undefined, requestOptions);
+      const toolsResponse = await client.listTools(undefined, requestOptions);
+
+      if (this.llmService?.isAvailable()) {
+        const incomingFields = [
+          ...resourcesResponse.resources.map((r) => ({ name: r.name, description: r.description })),
+          ...toolsResponse.tools.map((t) => ({ name: t.name, description: t.description })),
+        ];
+
+        const handled = new Set<string>();
+
+        if (incomingFields.length > 0) {
+          const existingConcepts = this.manager.listConcepts().map((c) => ({
+            id: c.id,
+            name: c.name,
+            type: c.type,
+            description: c.description.slice(0, 120),
+          }));
+
+          try {
+            const proposals = await this.llmService.proposeMappings(
+              'architect',
+              { systemName: system.name, systemType: system.type, incomingFields },
+              existingConcepts
+            );
+
+            for (const proposal of proposals) {
+              const concept = this.manager.getConcept(proposal.mappedConceptId);
+
+              if (proposal.confidence >= HIGH_CONFIDENCE_THRESHOLD && concept) {
+                this.linkConceptToSystem(concept.id, system.id, proposal.incomingField, result);
+                handled.add(proposal.incomingField);
+              } else {
+                // Unlike discoverFromSchema (which tracks a separate `gapped` set to
+                // exclude low-confidence entities from its deterministic fallback), a
+                // gapped item here is intentionally left out of `handled` only — it
+                // still runs through ingestResource/ingestTool below. This keeps every
+                // MCP resource/tool represented in the ontology even while its mapping
+                // to an existing concept remains open as a gap.
+                if (proposal.confidence >= HIGH_CONFIDENCE_THRESHOLD) {
+                  // High confidence but mappedConceptId doesn't exist — hallucinated ID.
+                  this.reportHallucinatedProposal(system.id, proposal, result);
+                } else {
+                  this.reportLlmGap(system.id, proposal, result);
+                }
+              }
+            }
+          } catch (err) {
+            result.errors.push(`LLM proposal failed: ${String(err)}`);
+          }
+        }
+
+        // Deterministic fallback for items the LLM did not handle
+        for (const resource of resourcesResponse.resources) {
+          if (!handled.has(resource.name)) {
+            await this.ingestResource(system, resource, result);
+          }
+        }
+        for (const tool of toolsResponse.tools) {
+          if (!handled.has(tool.name)) {
+            await this.ingestTool(system, tool, result);
+          }
+        }
+      } else {
+        // Deterministic path — unchanged behaviour when LLM is unavailable
+        for (const resource of resourcesResponse.resources) {
+          await this.ingestResource(system, resource, result);
+        }
+        for (const tool of toolsResponse.tools) {
+          await this.ingestTool(system, tool, result);
+        }
       }
 
-      // ── Ingest Tools (as process concepts) ─────────────────────────────────
-      const toolsResponse = await client.listTools();
-      for (const tool of toolsResponse.tools) {
-        await this.ingestTool(system, tool, result);
-      }
-
-      // ── Update system ───────────────────────────────────────────────────────
       this.manager.updateSystem(systemId, {
         status: 'active',
         lastIngestedAt: result.timestamp,
@@ -143,7 +203,6 @@ export class McpConnector {
       },
     });
 
-    // Flag the gap: system is registered but not yet ingested
     this.manager.addGap({
       type: 'unknown_system',
       description: `MCP system "${name}" registered but not yet ingested`,
@@ -157,7 +216,77 @@ export class McpConnector {
     return system;
   }
 
-  // ─── Private helpers ───────────────────────────────────────────────────────
+  // ─── LLM helpers ──────────────────────────────────────────────────────────
+
+  /**
+   * High-confidence path: add a SystemMapping to an existing concept, pointing
+   * it at this MCP server entity.
+   */
+  private linkConceptToSystem(
+    conceptId: string,
+    systemId: string,
+    entityName: string,
+    result: IngestionResult
+  ): void {
+    const concept = this.manager.getConcept(conceptId);
+    if (!concept) return;
+
+    const alreadyLinked = concept.systemMappings.some(
+      (m) => m.systemId === systemId && m.entityName === entityName
+    );
+    if (alreadyLinked) return;
+
+    const updatedMappings: SystemMapping[] = [
+      ...concept.systemMappings,
+      { systemId, entityName, fieldMappings: [], authType: 'mcp' },
+    ];
+    this.manager.updateConcept(conceptId, { systemMappings: updatedMappings });
+    result.conceptsUpdated++;
+  }
+
+  /** Low-confidence path: report a gap with the field name and LLM reasoning. */
+  private reportLlmGap(
+    systemId: string,
+    proposal: IngestionMappingProposal,
+    result: IngestionResult
+  ): void {
+    const conceptExists =
+      !!proposal.mappedConceptId && !!this.manager.getConcept(proposal.mappedConceptId);
+
+    this.manager.addGap({
+      type: 'missing_mapping',
+      description: `Low-confidence mapping for "${proposal.incomingField}" (${(proposal.confidence * 100).toFixed(0)}% confidence): ${proposal.reasoning}`,
+      affectedConceptIds: conceptExists ? [proposal.mappedConceptId] : [],
+      severity: proposal.confidence < 0.5 ? 'high' : 'medium',
+      status: 'open',
+      source: `llm_ingestion:${systemId}`,
+    });
+    result.gapsDetected++;
+  }
+
+  /**
+   * High-confidence proposal pointed at a concept ID that doesn't exist in the
+   * ontology (an LLM hallucination). Reported distinctly from a genuinely
+   * low-confidence mapping so the gap description doesn't read "low confidence"
+   * next to a high confidence score.
+   */
+  private reportHallucinatedProposal(
+    systemId: string,
+    proposal: IngestionMappingProposal,
+    result: IngestionResult
+  ): void {
+    this.manager.addGap({
+      type: 'missing_mapping',
+      description: `LLM proposed non-existent concept ID "${proposal.mappedConceptId}" for entity "${proposal.incomingField}" (${(proposal.confidence * 100).toFixed(0)}% confidence): ${proposal.reasoning}`,
+      affectedConceptIds: [],
+      severity: 'medium',
+      status: 'open',
+      source: `llm_ingestion:${systemId}`,
+    });
+    result.gapsDetected++;
+  }
+
+  // ─── Deterministic helpers ─────────────────────────────────────────────────
 
   private async ingestResource(
     system: SystemDef,
@@ -165,10 +294,8 @@ export class McpConnector {
     result: IngestionResult
   ): Promise<void> {
     const entityName = resource.name;
-    const description =
-      resource.description ?? `${entityName} from ${system.name}`;
+    const description = resource.description ?? `${entityName} from ${system.name}`;
 
-    // Check if concept exists already (by name + system mapping)
     const existing = this.manager.listConcepts({ systemId: system.id });
     const alreadyMapped = existing.find((c) =>
       c.systemMappings.some((m) => m.entityName === entityName)
@@ -183,7 +310,6 @@ export class McpConnector {
     };
 
     if (alreadyMapped) {
-      // Update the mapping
       const updatedMappings = alreadyMapped.systemMappings.map((m) =>
         m.entityName === entityName ? systemMapping : m
       );
@@ -216,38 +342,41 @@ export class McpConnector {
       c.systemMappings.some((m) => m.entityName === tool.name)
     );
 
-    if (alreadyMapped) {
-      result.conceptsUpdated++;
-      return;
-    }
-
-    // Extract field mappings from tool input schema
     const fieldMappings: FieldMapping[] = [];
     const schema = tool.inputSchema as Record<string, unknown> | undefined;
     const properties = schema?.properties as Record<string, unknown> | undefined;
     if (properties) {
       for (const fieldName of Object.keys(properties)) {
-        fieldMappings.push({
-          ontologyField: fieldName,
-          systemField: fieldName,
-        });
+        fieldMappings.push({ ontologyField: fieldName, systemField: fieldName });
       }
+    }
+
+    const systemMapping: SystemMapping = {
+      systemId: system.id,
+      entityName: tool.name,
+      fieldMappings,
+      authType: 'mcp',
+    };
+
+    if (alreadyMapped) {
+      const updatedMappings = alreadyMapped.systemMappings.map((m) =>
+        m.entityName === tool.name ? systemMapping : m
+      );
+      this.manager.updateConcept(alreadyMapped.id, {
+        systemMappings: updatedMappings,
+        description: tool.description ?? alreadyMapped.description,
+        updatedAt: new Date().toISOString(),
+      });
+      result.conceptsUpdated++;
+      return;
     }
 
     this.manager.addConcept({
       name: tool.name,
       type: 'process',
-      description:
-        tool.description ?? `Process: ${tool.name} in ${system.name}`,
+      description: tool.description ?? `Process: ${tool.name} in ${system.name}`,
       attributes: {},
-      systemMappings: [
-        {
-          systemId: system.id,
-          entityName: tool.name,
-          fieldMappings,
-          authType: 'mcp',
-        },
-      ],
+      systemMappings: [systemMapping],
       tags: ['mcp', 'process', system.id],
       confidence: 0.7,
     });

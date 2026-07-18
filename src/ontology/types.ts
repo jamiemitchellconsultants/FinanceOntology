@@ -149,6 +149,8 @@ export interface IngestionConfig {
   headers?: Record<string, string>;
   /** How often to poll for updates (ms), 0 = on-demand only */
   pollIntervalMs?: number;
+  /** Request timeout (ms) for the ingestion fetch call. Defaults to 30000. */
+  timeoutMs?: number;
   mappings?: IngestionMapping[];
 }
 

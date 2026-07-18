@@ -29,10 +29,36 @@ import { OntologyManager } from './ontology/manager.js';
 import { ApiConnector } from './ingestion/api-connector.js';
 import { McpConnector } from './ingestion/mcp-connector.js';
 import { GapAnalyzer } from './gaps/analyzer.js';
+import { LlmService } from './services/llm.js';
 import { FINANCE_SEED } from './seed/finance-seed.js';
 import type { ConceptType, RelationshipType, GapSeverity } from './ontology/types.js';
 
 // ─── Server setup ─────────────────────────────────────────────────────────────
+
+/**
+ * Parse MCP_INGESTION_ALLOWED_COMMANDS as a JSON array of [command, ...args]
+ * tuples, e.g. [["node","dist/servers/erp-mcp.js"]]. Throws on malformed input
+ * so a misconfigured allowlist fails the server at startup rather than
+ * silently permitting everything.
+ */
+function parseMcpInvocationAllowlist(raw: string | undefined): string[][] | undefined {
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`Invalid MCP_INGESTION_ALLOWED_COMMANDS (not valid JSON): ${String(err)}`);
+  }
+  const isValid =
+    Array.isArray(parsed) &&
+    parsed.every((entry) => Array.isArray(entry) && entry.every((v) => typeof v === 'string'));
+  if (!isValid) {
+    throw new Error(
+      'MCP_INGESTION_ALLOWED_COMMANDS must be a JSON array of string arrays, e.g. [["node","server.js"]]'
+    );
+  }
+  return parsed as string[][];
+}
 
 export function createServer(dataPath?: string): McpServer {
   const store = new OntologyStore(dataPath);
@@ -44,9 +70,18 @@ export function createServer(dataPath?: string): McpServer {
     manager.save();
   }
 
-  const apiConnector = new ApiConnector(manager);
-  const mcpConnector = new McpConnector(manager);
+  const llmService = new LlmService();
+  const apiConnector = new ApiConnector(manager, llmService);
+  const mcpConnector = new McpConnector(manager, llmService);
   const gapAnalyzer = new GapAnalyzer(manager);
+
+  // Optional operator-configured allowlist restricting which (command, args)
+  // invocations ingest_from_mcp may spawn. Unset = no restriction (existing
+  // behaviour). Validating the full invocation — not just the command — closes
+  // the bypass where an allowlisted binary (e.g. `node`) is paired with
+  // attacker-controlled args (e.g. `--eval`) to still achieve code execution.
+  const rawMcpAllowlist = process.env['MCP_INGESTION_ALLOWED_COMMANDS'];
+  const mcpInvocationAllowlist = parseMcpInvocationAllowlist(rawMcpAllowlist);
 
   const server = new McpServer({
     name: 'finance-ontology',
@@ -596,13 +631,37 @@ export function createServer(dataPath?: string): McpServer {
 
   server.tool(
     'ingest_from_mcp',
-    'Connect to an external MCP server and ingest its resources and tools into the ontology.',
+    'Connect to an external MCP server and ingest its resources and tools into the ontology. ' +
+      'SECURITY: this tool spawns `command` (with `args`) as a subprocess on the server host. It ' +
+      'must only be invoked by a trusted operator with a known, vetted command+args pair — never ' +
+      'with values derived from untrusted agent input or external content, since an allowlisted ' +
+      'binary paired with attacker-controlled args (e.g. `node --eval ...`) still grants arbitrary ' +
+      'code execution. Operators can restrict permitted invocations via the ' +
+      'MCP_INGESTION_ALLOWED_COMMANDS env var (a JSON array of [command, ...args] tuples that must ' +
+      'match exactly).',
     {
       system_id: z.string().describe('ID of the registered MCP system'),
       command: z.string().describe('Command to spawn the MCP server process'),
       args: z.array(z.string()).optional().describe('Command arguments'),
     },
     async (params) => {
+      if (mcpInvocationAllowlist) {
+        const invocation = [params.command, ...(params.args ?? [])];
+        const isAllowed = mcpInvocationAllowlist.some(
+          (entry) => entry.length === invocation.length && entry.every((v, i) => v === invocation[i])
+        );
+        if (!isAllowed) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `Command+args not permitted by MCP_INGESTION_ALLOWED_COMMANDS allowlist: ${JSON.stringify(invocation)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
       const result = await mcpConnector.ingestFromMcpServer(params.system_id, {
         command: params.command,
         args: params.args,
