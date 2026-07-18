@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.js.map
+*.d.ts.map
+.env
+.env.*
+!.env.example
+data/ontology.json
+*.log
+.DS_Store
+coverage/
