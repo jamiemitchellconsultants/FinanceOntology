@@ -103,7 +103,7 @@ const concepts: Record<string, Concept> = {
     name: 'Chart of Accounts',
     type: 'entity',
     description:
-      'A structured list of all financial accounts used by the organisation. ' +
+      'A structured list of all financial accounts used by the organization. ' +
       'Each account has a code, name, type (asset/liability/equity/income/expense), and hierarchy.',
     attributes: {
       account_code: { type: 'string', description: 'Unique account identifier', required: true },
@@ -145,7 +145,7 @@ const concepts: Record<string, Concept> = {
     name: 'General Ledger',
     type: 'entity',
     description:
-      'The complete record of all financial transactions of the organisation. ' +
+      'The complete record of all financial transactions of the organization. ' +
       'Each entry (journal line) is associated with an account, period, amount, and reference.',
     attributes: {
       journal_id: { type: 'string', description: 'Journal entry identifier', required: true },
@@ -200,7 +200,7 @@ const concepts: Record<string, Concept> = {
     name: 'Cost Center',
     type: 'dimension',
     description:
-      'An organisational unit used to accumulate costs. ' +
+      'An organizational unit used to accumulate costs. ' +
       'Cost centers are used to track departmental spending against budget.',
     attributes: {
       code: { type: 'string', description: 'Unique cost center code', required: true },
@@ -242,7 +242,7 @@ const concepts: Record<string, Concept> = {
     name: 'Profit Center',
     type: 'dimension',
     description:
-      'An organisational unit used to measure profitability. ' +
+      'An organizational unit used to measure profitability. ' +
       'Profit centers capture both revenues and costs to calculate contribution margins.',
     attributes: {
       code: { type: 'string', description: 'Profit center code', required: true },
@@ -272,7 +272,7 @@ const concepts: Record<string, Concept> = {
     name: 'Vendor',
     type: 'entity',
     description:
-      'A supplier or service provider from whom the organisation purchases goods or services.',
+      'A supplier or service provider from whom the organization purchases goods or services.',
     attributes: {
       vendor_id: { type: 'string', description: 'Unique vendor identifier', required: true },
       name: { type: 'string', description: 'Vendor / supplier name', required: true },
@@ -378,7 +378,7 @@ const concepts: Record<string, Concept> = {
     name: 'Purchase Order',
     type: 'entity',
     description:
-      'A formal request from the organisation to a vendor to supply goods or services at an agreed price.',
+      'A formal request from the organization to a vendor to supply goods or services at an agreed price.',
     attributes: {
       po_number: { type: 'string', description: 'Purchase order number', required: true },
       vendor_id: { type: 'string', description: 'Vendor identifier', required: true },
@@ -488,7 +488,7 @@ const concepts: Record<string, Concept> = {
     name: 'Bank Account',
     type: 'entity',
     description:
-      'A bank account held by the organisation. ' +
+      'A bank account held by the organization. ' +
       'Tracked in the treasury system for cash position and payment execution.',
     attributes: {
       account_number: { type: 'string', description: 'Bank account number (masked)', required: true },
@@ -533,7 +533,7 @@ const concepts: Record<string, Concept> = {
     name: 'Payment',
     type: 'process',
     description:
-      'The execution of a payment from the organisation to a vendor or employee. ' +
+      'The execution of a payment from the organization to a vendor or employee. ' +
       'Payments are approved in AP/expense systems and executed via the banking system.',
     attributes: {
       payment_id: { type: 'string', description: 'Payment reference', required: true },
@@ -700,7 +700,7 @@ const concepts: Record<string, Concept> = {
     name: 'Cash Flow',
     type: 'metric',
     description:
-      'The net movement of cash in and out of the organisation. ' +
+      'The net movement of cash in and out of the organization. ' +
       'Includes operating, investing, and financing activities.',
     attributes: {
       period: { type: 'string', description: 'Period (YYYY-MM)', required: true },

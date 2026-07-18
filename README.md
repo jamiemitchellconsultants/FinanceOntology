@@ -144,7 +144,7 @@ This loads 14 core finance concepts, 15 relationships, 6 systems, and 5 known ga
 | Invoice | Entity | Vendor invoice for payment |
 | Purchase Order | Entity | Formal purchase request |
 | Budget | Entity | Financial plan by period |
-| Bank Account | Entity | Organisation bank accounts |
+| Bank Account | Entity | Organization bank accounts |
 | Payment | Process | Payment execution |
 | Expense Report | Entity | Employee expense claims |
 | Trial Balance | Report | Account balances by period |
